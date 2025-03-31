@@ -18,4 +18,4 @@ jobs:
       uses: microsoft/setup-msbuild@v1
 
     - name: Build solution for x86 Release
-      run: msbuild Argentum_Compressor.sln /p:Configuration=Release;Platform=x86 /m
+	  run: msbuild Argentum_Compressor.sln /p:"Configuration=Release;Platform=x86" /m
