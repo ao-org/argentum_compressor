@@ -1,4 +1,4 @@
-name: Build Argentum Compressor
+name: Build Argentum Compressor (x86 Release)
 
 on:
   push:
@@ -11,11 +11,12 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    - name: Set up MSBuild path
-      uses: microsoft/setup-msbuild@v1
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v1
 
-    - name: Build solution for x86 Release
-	  run: msbuild Argentum_Compressor.sln /p:"Configuration=Release;Platform=x86" /m
+      - name: Build solution for x86 Release
+        run: 'msbuild Argentum_Compressor.sln /p:"Configuration=Release;Platform=x86" /m'
+
