@@ -325,6 +325,7 @@ bool compressFiles(const fs::path& inputDir, const fs::path& outputFile, const s
         std::cerr << "Failed to open output file: " << outputFile << "\n";
         return false;
     }
+
     ofs.write(reinterpret_cast<const char*>(&fh), sizeof(fh));
 
     std::vector<InfoHeader> infoHeaders;
@@ -359,6 +360,7 @@ bool compressFiles(const fs::path& inputDir, const fs::path& outputFile, const s
 // 3. Decrypts using CryptoSys API (AES-128/CFB/nopad via CIPHER_DecryptBytes2).
 // 4. Decompresses using ZLIB_Inflate.
 // 5. Writes the resulting file.
+
 bool extractFiles(const fs::path& archiveFile, const fs::path& outputDir, const std::string& password) {
     std::ifstream ifs(archiveFile, std::ios::binary);
     if (!ifs) {
@@ -366,15 +368,19 @@ bool extractFiles(const fs::path& archiveFile, const fs::path& outputDir, const 
         return false;
     }
     ifs.seekg(0, std::ios::end);
-    uint32_t archiveSize = ifs.tellg();
+    uint32_t archiveSize = static_cast<uint32_t>(ifs.tellg());
     ifs.seekg(0, std::ios::beg);
 
+    // Read the file header.
     FileHeader fh;
     ifs.read(reinterpret_cast<char*>(&fh), sizeof(fh));
-    if (archiveSize != fh.fileSize) {
+
+    if (archiveSize + 1 != fh.fileSize) {
         std::cerr << "Archive file size mismatch. File may be corrupted.\n";
         return false;
     }
+
+    // Validate the password hash.
     std::string providedHash = csMD5String(password.empty() ? "Contraseña" : password);
     std::string storedHash(fh.passwordHash, sizeof(fh.passwordHash));
     storedHash.erase(std::find(storedHash.begin(), storedHash.end(), ' '), storedHash.end());
@@ -382,10 +388,12 @@ bool extractFiles(const fs::path& archiveFile, const fs::path& outputDir, const 
         std::cerr << "Invalid password.\n";
         return false;
     }
+
     uint16_t numFiles = fh.numFiles;
     std::vector<InfoHeader> infoHeaders(numFiles);
-    for (int i = 0; i < numFiles; i++)
+    for (int i = 0; i < numFiles; i++) {
         ifs.read(reinterpret_cast<char*>(&infoHeaders[i]), sizeof(InfoHeader));
+    }
     fs::create_directories(outputDir);
 
     std::cout << "Extracting " << numFiles << " files...\n";
@@ -393,15 +401,19 @@ bool extractFiles(const fs::path& archiveFile, const fs::path& outputDir, const 
     std::vector<unsigned char> iv = hexStringToBytesLocal(fixedIVHex);
     for (int i = 0; i < numFiles; i++) {
         InfoHeader& ih = infoHeaders[i];
-        ifs.seekg(ih.fileStart, std::ios::beg);
+        // Adjust for 1-based offset: subtract 1 to get the correct 0-based position.
+        ifs.seekg(ih.fileStart - 1, std::ios::beg);
         std::vector<unsigned char> encryptedData(ih.fileSize);
         ifs.read(reinterpret_cast<char*>(encryptedData.data()), ih.fileSize);
-        // XOR-decrypt.
+
+        // XOR-decrypt the data using the provided password.
         doCryptData(encryptedData, password);
-        // AES-decrypt using CryptoSys API.
+        // Decrypt using AES-128/CFB/nopad via CIPHER_DecryptBytes2.
         std::vector<unsigned char> aesDecrypted = csDecrypt(encryptedData, key, iv);
         // Decompress using ZLIB_Inflate.
         std::vector<unsigned char> decompressed = csDecompress(aesDecrypted, ih.uncompressedSize);
+
+        // Recover the filename (trim spaces)
         std::string filename(ih.fileName, sizeof(ih.fileName));
         filename.erase(std::find_if(filename.rbegin(), filename.rend(),
             [](unsigned char ch) { return !std::isspace(ch); }).base(),
