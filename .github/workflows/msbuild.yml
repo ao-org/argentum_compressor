@@ -17,5 +17,5 @@ jobs:
     - name: Set up MSBuild path
       uses: microsoft/setup-msbuild@v1
 
-    - name: Build solution
-      run: msbuild Argentum_Compressor.sln /p:Configuration=Release /m
+    - name: Build solution for x86 Release
+      run: msbuild Argentum_Compressor.sln /p:Configuration=Release;Platform=x86 /m
