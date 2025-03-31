@@ -1,0 +1,21 @@
+name: Build Argentum Compressor
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up MSBuild path
+      uses: microsoft/setup-msbuild@v1
+
+    - name: Build solution
+      run: msbuild Argentum_Compressor.sln /p:Configuration=Release /m
