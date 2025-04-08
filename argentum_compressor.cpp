@@ -15,8 +15,8 @@
 
     You should have received a copy of the GNU Affero General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
 
- */
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <cctype>
 #include <iterator>
+#include <chrono>
 
 // Include the CryptoSys API header.
 #include "diCryptoSys.h"
@@ -44,6 +45,9 @@ constexpr size_t INFOHEADER_SIZE = 44;  // 4 + 4 + 32 + 4 bytes
 
 const std::string fixedKeyHex = "AB45456789ABCDEFA0E1D2C3B4A59666";
 const std::string fixedIVHex = "FEDCAA9A76543A10FEDCBA9876543322";
+
+// Password file size (as in VB6, PASS_SIZE = 200)
+constexpr size_t PASS_SIZE = 200;
 
 #pragma pack(push, 1)
 struct FileHeader {
@@ -113,11 +117,86 @@ void printHexBuffer(const std::string& label, const std::vector<unsigned char>& 
 }
 
 //--------------------------------------------------------------------------
+// New functions to save and retrieve the password (AO.bin)
+//--------------------------------------------------------------------------
+
+// savePasswordFile: Mimics VB6 SavePassword. It creates a PASS_SIZE-byte buffer
+// that interleaves characters from a fixed junk string with the password characters (all XOR'd with 37),
+// fills the remainder with junk and writes the two-byte password length at the end.
+void savePasswordFile(const std::string& filePath, const std::string& password) {
+    const std::string randomJunk = "c99b59c65a5501b5a19a5245d5db68c1af2831337f9f5191f792ae367484cdd51a50135229d79ea74550b3e7dad671a42154d50077b077f8dcd582cd0d7710";
+    size_t pwdLen = password.size();
+    if (pwdLen * 3 + 2 > PASS_SIZE) {
+        throw std::runtime_error("Password too long to fit in PASS_SIZE buffer");
+    }
+
+    std::vector<unsigned char> data(PASS_SIZE, 0);
+
+    // Interleave password with junk
+    for (size_t i = 1; i <= pwdLen; i++) {
+        size_t idx1 = i * 3 - 2 - 1; // VB's 1-based converted to 0-based.
+        size_t idx2 = i * 3 - 1 - 1;
+        size_t idx3 = i * 3 - 1;     // i*3 in VB => index (i*3-1) in 0-based.
+        unsigned char junkChar1 = static_cast<unsigned char>(randomJunk.at(i * 2 - 2));
+        unsigned char junkChar2 = static_cast<unsigned char>(randomJunk.at(i * 2 - 1));
+        unsigned char passChar = static_cast<unsigned char>(password.at(i - 1));
+        data[idx1] = static_cast<unsigned char>(junkChar1 ^ 37);
+        data[idx2] = static_cast<unsigned char>(passChar ^ 37);
+        data[idx3] = static_cast<unsigned char>(junkChar2 ^ 37);
+    }
+
+    // Fill remaining bytes with junk (from index = pwdLen*3 to PASS_SIZE-3)
+    for (size_t i = pwdLen * 3; i < PASS_SIZE - 2; i++) {
+        size_t j = i + 1; // Convert to 1-based for mimicry.
+        size_t rIndex = ((j * 2) % randomJunk.size());
+        if (rIndex == 0)
+            rIndex = randomJunk.size();
+        rIndex--; // convert to 0-based.
+        data[i] = static_cast<unsigned char>(randomJunk.at(rIndex) ^ 37);
+    }
+
+    // Store password length in the last two bytes.
+    data[PASS_SIZE - 2] = static_cast<unsigned char>(pwdLen / 256);
+    data[PASS_SIZE - 1] = static_cast<unsigned char>(pwdLen & 0xFF);
+
+    std::ofstream ofs(filePath, std::ios::binary);
+    if (!ofs)
+        throw std::runtime_error("Failed to open file for writing: " + filePath);
+    ofs.write(reinterpret_cast<const char*>(data.data()), data.size());
+    ofs.close();
+}
+
+// getPasswordFile: Mimics VB6 GetPassword. Reads PASS_SIZE bytes from the file,
+// determines the password length from the last two bytes, then extracts each password character from the proper position (XOR'd with 37).
+std::string getPasswordFile(const std::string& filePath) {
+    std::vector<unsigned char> data(PASS_SIZE, 0);
+    std::ifstream ifs(filePath, std::ios::binary);
+    if (!ifs)
+        throw std::runtime_error("Failed to open file for reading: " + filePath);
+    ifs.read(reinterpret_cast<char*>(data.data()), PASS_SIZE);
+    ifs.close();
+
+    size_t lenHigh = data[PASS_SIZE - 2];
+    size_t lenLow = data[PASS_SIZE - 1];
+    size_t pwdLen = lenHigh * 256 + lenLow;
+
+    std::string password;
+    for (size_t i = 1; i <= pwdLen; i++) {
+        size_t idx = i * 3 - 2 - 1;  // VB's Data(i*3 - 1) in 0-based index.
+        if (idx >= PASS_SIZE) {
+            throw std::runtime_error("Stored password length is out of range.");
+        }
+        unsigned char ch = data[idx] ^ 37;
+        password.push_back(static_cast<char>(ch));
+    }
+    return password;
+}
+
+//--------------------------------------------------------------------------
 // CryptoSys API Compression Wrappers using diCryptoSys.h
 //--------------------------------------------------------------------------
 
 // csCompress: Compress data using ZLIB_Deflate.
-// After compression, ensure that the standard two-byte header (0x78, 0x9C) is present.
 std::vector<unsigned char> csCompress(const std::vector<unsigned char>& data) {
     long outSize = static_cast<long>(data.size() * 2); // Estimate output size.
     std::vector<unsigned char> out(outSize);
@@ -126,7 +205,7 @@ std::vector<unsigned char> csCompress(const std::vector<unsigned char>& data) {
         throw std::runtime_error("ZLIB_Deflate failed with code " + std::to_string(ret));
     }
     out.resize(ret);
-    // Check for standard header (0x78, 0x9C) and prepend if missing.
+    // Ensure standard header (0x78, 0x9C).
     if (out.size() < 2 || out[0] != 0x78 || out[1] != 0x9C) {
         std::vector<unsigned char> newOut;
         newOut.push_back(0x78);
@@ -138,7 +217,6 @@ std::vector<unsigned char> csCompress(const std::vector<unsigned char>& data) {
 }
 
 // csDecompress: Decompress data using ZLIB_Inflate.
-// uncompressedSize must be provided.
 std::vector<unsigned char> csDecompress(const std::vector<unsigned char>& data, size_t uncompressedSize) {
     long nOut = static_cast<long>(uncompressedSize);
     std::vector<unsigned char> out(nOut);
@@ -154,7 +232,7 @@ std::vector<unsigned char> csDecompress(const std::vector<unsigned char>& data, 
 // CryptoSys API Wrappers for Encryption/Decryption and MD5
 //--------------------------------------------------------------------------
 
-// csEncrypt: Encrypt data using AES-128/CFB/nopad mode via CIPHER_EncryptBytes2.
+// csEncrypt: Encrypt data using AES-128/CFB/nopad via CIPHER_EncryptBytes2.
 std::vector<unsigned char> csEncrypt(const std::vector<unsigned char>& data,
     const std::vector<unsigned char>& key,
     const std::vector<unsigned char>& iv) {
@@ -171,7 +249,7 @@ std::vector<unsigned char> csEncrypt(const std::vector<unsigned char>& data,
     return out;
 }
 
-// csDecrypt: Decrypt data using AES-128/CFB/nopad mode via CIPHER_DecryptBytes2.
+// csDecrypt: Decrypt data using AES-128/CFB/nopad via CIPHER_DecryptBytes2.
 std::vector<unsigned char> csDecrypt(const std::vector<unsigned char>& data,
     const std::vector<unsigned char>& key,
     const std::vector<unsigned char>& iv) {
@@ -190,7 +268,7 @@ std::vector<unsigned char> csDecrypt(const std::vector<unsigned char>& data,
 
 // csMD5String: Compute MD5 hash using MD5_StringHexHash.
 std::string csMD5String(const std::string& input) {
-    char digest[API_MD5_CHARS + 1] = { 0 };  // API_MD5_CHARS is 32.
+    char digest[API_MD5_CHARS + 1] = { 0 };
     long ret = MD5_StringHexHash(digest, input.c_str());
     if (ret < 0) {
         throw std::runtime_error("MD5_StringHexHash failed with code " + std::to_string(ret));
@@ -215,13 +293,8 @@ void doCryptData(std::vector<unsigned char>& data, const std::string& password) 
 }
 
 //--------------------------------------------------------------------------
-// compressFiles: For each file in inputDir, read its data, and if non-empty, process it.
-// Pipeline:
-//   1. Compress using csCompress (ZLIB_Deflate)
-//   2. Encrypt using csEncrypt (AES-128/CFB/nopad via CIPHER_EncryptBytes2)
-//   3. XOR-encrypt with the provided password
-// The archive is then written with a FileHeader and one InfoHeader per file.
-// If verbose is true, the tool prints intermediate buffers.
+// compressFiles: Process files from inputDir, compress+encrypt+XOR, write archive,
+// and save the password file (AO.bin) in the same directory as the archive.
 bool compressFiles(const fs::path& inputDir, const fs::path& outputFile, const std::string& password, bool verbose) {
     std::vector<FileEntry> entries;
 
@@ -254,48 +327,27 @@ bool compressFiles(const fs::path& inputDir, const fs::path& outputFile, const s
                 continue;
             }
             if (verbose) {
-                std::cout << "Original Data:" << std::endl;
-                // Print only first 128 bytes if too large.
-                std::vector<unsigned char> preview(fileData.begin(), fileData.begin() + std::min<size_t>(fileData.size(), 128));
-                // Print as hex:
-                std::cout << "[ ";
-                for (unsigned char b : preview) {
-                    std::cout << "0x" << std::hex << std::setw(2) << std::setfill('0')
-                        << static_cast<int>(b) << " ";
-                }
-                std::cout << "]" << std::dec << "\n";
+                printHexBuffer("Original Data", std::vector<unsigned char>(fileData.begin(), fileData.begin() + std::min<size_t>(fileData.size(), 128)));
             }
             FileEntry fe;
             fe.relativePath = fs::relative(p.path(), inputDir).generic_string();
             fe.uncompressedSize = static_cast<uint32_t>(fileData.size());
 
-            // Compress using CryptoSys API's ZLIB_Deflate.
             std::vector<unsigned char> compressed = csCompress(fileData);
-            if (verbose) {
-                printHexBuffer("Compressed Data", compressed);
-            }
-            // Prepare key and IV.
+            if (verbose) { printHexBuffer("Compressed Data", compressed); }
             std::vector<unsigned char> key = hexStringToBytesLocal(fixedKeyHex);
             std::vector<unsigned char> iv = hexStringToBytesLocal(fixedIVHex);
-            // Encrypt using CryptoSys API (AES-128/CFB/nopad via CIPHER_EncryptBytes2).
             std::vector<unsigned char> encrypted = csEncrypt(compressed, key, iv);
-            if (verbose) {
-                printHexBuffer("Encrypted Data", encrypted);
-            }
-            // XOR-encrypt with the provided password.
+            if (verbose) { printHexBuffer("Encrypted Data", encrypted); }
             doCryptData(encrypted, password);
-            if (verbose) {
-                printHexBuffer("XOR-Encrypted Data", encrypted);
-            }
+            if (verbose) { printHexBuffer("XOR-Encrypted Data", encrypted); }
             fe.data = std::move(encrypted);
             entries.push_back(std::move(fe));
-
             printProgressBar(static_cast<double>(currentIndex) / totalFiles);
         }
     }
     std::cout << "\nAll files processed. Sorting and writing archive...\n";
 
-    // Sort entries by base filename (case-insensitive).
     std::sort(entries.begin(), entries.end(), [](const FileEntry& a, const FileEntry& b) {
         std::string nameA = toLowerStr(fs::path(a.relativePath).filename().string());
         std::string nameB = toLowerStr(fs::path(b.relativePath).filename().string());
@@ -303,16 +355,13 @@ bool compressFiles(const fs::path& inputDir, const fs::path& outputFile, const s
         });
 
     uint16_t numFiles = static_cast<uint16_t>(entries.size());
-    // Calculate header size (no extra byte added here)
     size_t headerSize = FILEHEADER_SIZE + numFiles * INFOHEADER_SIZE;
-
-    // Set currentOffset to headerSize + 1 so that stored offsets are 1-based
+    // Make stored offsets 1-based.
     uint32_t currentOffset = static_cast<uint32_t>(headerSize) + 1;
     uint32_t totalSize = static_cast<uint32_t>(headerSize) + 1;
     for (auto& e : entries)
         totalSize += static_cast<uint32_t>(e.data.size());
 
-   
     FileHeader fh;
     fh.fileSize = totalSize;
     fh.numFiles = numFiles;
@@ -325,7 +374,6 @@ bool compressFiles(const fs::path& inputDir, const fs::path& outputFile, const s
         std::cerr << "Failed to open output file: " << outputFile << "\n";
         return false;
     }
-
     ofs.write(reinterpret_cast<const char*>(&fh), sizeof(fh));
 
     std::vector<InfoHeader> infoHeaders;
@@ -350,17 +398,17 @@ bool compressFiles(const fs::path& inputDir, const fs::path& outputFile, const s
         ofs.write(reinterpret_cast<const char*>(e.data.data()), e.data.size());
     ofs.close();
     std::cout << "\nArchive successfully written to " << outputFile << "\n";
+
+    // Automatically save the password file (AO.bin) in the same directory as the archive.
+    fs::path passFile = outputFile.parent_path() / "AO.bin";
+    savePasswordFile(passFile.string(), password);
+    std::cout << "Password file saved as: " << passFile << "\n";
+
     return true;
 }
 
 //--------------------------------------------------------------------------
-// extractFiles: Opens an archive, verifies the header, then for each file:
-// 1. Reads the encrypted blob.
-// 2. XOR-decrypts it.
-// 3. Decrypts using CryptoSys API (AES-128/CFB/nopad via CIPHER_DecryptBytes2).
-// 4. Decompresses using ZLIB_Inflate.
-// 5. Writes the resulting file.
-
+// extractFiles: Opens an archive and extracts files using the provided password.
 bool extractFiles(const fs::path& archiveFile, const fs::path& outputDir, const std::string& password) {
     std::ifstream ifs(archiveFile, std::ios::binary);
     if (!ifs) {
@@ -371,16 +419,15 @@ bool extractFiles(const fs::path& archiveFile, const fs::path& outputDir, const 
     uint32_t archiveSize = static_cast<uint32_t>(ifs.tellg());
     ifs.seekg(0, std::ios::beg);
 
-    // Read the file header.
     FileHeader fh;
     ifs.read(reinterpret_cast<char*>(&fh), sizeof(fh));
 
+    // Our stored file offsets are 1-based, so expect file size to match archiveSize+1.
     if (archiveSize + 1 != fh.fileSize) {
         std::cerr << "Archive file size mismatch. File may be corrupted.\n";
         return false;
     }
 
-    // Validate the password hash.
     std::string providedHash = csMD5String(password.empty() ? "Contraseña" : password);
     std::string storedHash(fh.passwordHash, sizeof(fh.passwordHash));
     storedHash.erase(std::find(storedHash.begin(), storedHash.end(), ' '), storedHash.end());
@@ -401,19 +448,15 @@ bool extractFiles(const fs::path& archiveFile, const fs::path& outputDir, const 
     std::vector<unsigned char> iv = hexStringToBytesLocal(fixedIVHex);
     for (int i = 0; i < numFiles; i++) {
         InfoHeader& ih = infoHeaders[i];
-        // Adjust for 1-based offset: subtract 1 to get the correct 0-based position.
+        // Subtract 1 from offset since we stored them 1-based.
         ifs.seekg(ih.fileStart - 1, std::ios::beg);
         std::vector<unsigned char> encryptedData(ih.fileSize);
         ifs.read(reinterpret_cast<char*>(encryptedData.data()), ih.fileSize);
 
-        // XOR-decrypt the data using the provided password.
         doCryptData(encryptedData, password);
-        // Decrypt using AES-128/CFB/nopad via CIPHER_DecryptBytes2.
         std::vector<unsigned char> aesDecrypted = csDecrypt(encryptedData, key, iv);
-        // Decompress using ZLIB_Inflate.
         std::vector<unsigned char> decompressed = csDecompress(aesDecrypted, ih.uncompressedSize);
 
-        // Recover the filename (trim spaces)
         std::string filename(ih.fileName, sizeof(ih.fileName));
         filename.erase(std::find_if(filename.rbegin(), filename.rend(),
             [](unsigned char ch) { return !std::isspace(ch); }).base(),
@@ -429,6 +472,17 @@ bool extractFiles(const fs::path& archiveFile, const fs::path& outputDir, const 
         std::cout << "[" << (i + 1) << "/" << numFiles << "] Extracted: " << filename << "\n";
     }
     return true;
+}
+
+//--------------------------------------------------------------------------
+// extractFilesUsingAO: New extraction mode that reads the password from AO.bin.
+// It locates the AO.bin file in the same directory as the archive.
+bool extractFilesUsingAO(const fs::path& archiveFile, const fs::path& outputDir) {
+    // Assume AO.bin is in the same directory as the archive.
+    fs::path passFile = archiveFile.parent_path() / "AO.bin";
+    std::string password = getPasswordFile(passFile.string());
+    std::cout << "Retrieved password from " << passFile << "\n";
+    return extractFiles(archiveFile, outputDir, password);
 }
 
 //--------------------------------------------------------------------------
@@ -455,8 +509,7 @@ bool dumpHeaders(const fs::path& archiveFile) {
     for (int i = 0; i < numFiles; i++) {
         std::string fileName(infoHeaders[i].fileName, sizeof(infoHeaders[i].fileName));
         fileName.erase(std::find_if(fileName.rbegin(), fileName.rend(),
-            [](unsigned char ch) { return !std::isspace(ch); }).base(),
-            fileName.end());
+            [](unsigned char ch) { return !std::isspace(ch); }).base(), fileName.end());
         std::cout << "File " << (i + 1) << ": " << fileName << std::endl;
         std::cout << "  File Start: " << infoHeaders[i].fileStart << std::endl;
         std::cout << "  Compressed File Size: " << infoHeaders[i].fileSize << std::endl;
@@ -466,7 +519,7 @@ bool dumpHeaders(const fs::path& archiveFile) {
 }
 
 //--------------------------------------------------------------------------
-// Main: Command-line interface for modes: compress, extract, dump.
+// Main: Command-line interface for modes: compress, extract, extract_ao, dump.
 // Verbose mode is enabled with -v.
 int main(int argc, char* argv[]) {
     std::cout << "Argentum Compressor Tool for Argentum Online\n";
@@ -476,6 +529,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Usage:\n"
             << "  " << argv[0] << " compress -i <input_dir> -o <archive_file> -p <password> [-v]\n"
             << "  " << argv[0] << " extract  -i <archive_file> -o <output_dir> -p <password>\n"
+            << "  " << argv[0] << " extract_ao -i <archive_file> -o <output_dir>\n"
             << "  " << argv[0] << " dump     -i <archive_file>\n";
         return 1;
     }
@@ -502,29 +556,48 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (mode == "dump") {
-        if (input.empty()) {
-            std::cerr << "Error: Please specify the archive file using -i\n";
+    try {
+        if (mode == "dump") {
+            if (input.empty()) {
+                std::cerr << "Error: Please specify the archive file using -i\n";
+                return 1;
+            }
+            return dumpHeaders(input) ? 0 : 1;
+        }
+        else if (mode == "compress") {
+            if (input.empty() || output.empty() || password.empty()) {
+                std::cerr << "Error: For compress mode, -i, -o, and -p are required.\n";
+                return 1;
+            }
+            // Optionally time the compression process.
+            auto start = std::chrono::steady_clock::now();
+            bool res = compressFiles(input, output, password, verbose);
+            auto end = std::chrono::steady_clock::now();
+            std::chrono::duration<double> diff = end - start;
+            std::cout << "Compression completed in " << diff.count() << " seconds.\n";
+            return res ? 0 : 1;
+        }
+        else if (mode == "extract") {
+            if (input.empty() || output.empty() || password.empty()) {
+                std::cerr << "Error: For extract mode, -i, -o, and -p are required.\n";
+                return 1;
+            }
+            return extractFiles(input, output, password) ? 0 : 1;
+        }
+        else if (mode == "extract_ao") {
+            if (input.empty() || output.empty()) {
+                std::cerr << "Error: For extract_ao mode, -i and -o are required.\n";
+                return 1;
+            }
+            return extractFilesUsingAO(input, output) ? 0 : 1;
+        }
+        else {
+            std::cerr << "Unknown mode: " << mode << "\n";
             return 1;
         }
-        return dumpHeaders(input) ? 0 : 1;
     }
-    else if (mode == "compress") {
-        if (input.empty() || output.empty() || password.empty()) {
-            std::cerr << "Error: For compress mode, -i, -o, and -p are required.\n";
-            return 1;
-        }
-        return compressFiles(input, output, password, verbose) ? 0 : 1;
-    }
-    else if (mode == "extract") {
-        if (input.empty() || output.empty() || password.empty()) {
-            std::cerr << "Error: For extract mode, -i, -o, and -p are required.\n";
-            return 1;
-        }
-        return extractFiles(input, output, password) ? 0 : 1;
-    }
-    else {
-        std::cerr << "Unknown mode: " << mode << "\n";
+    catch (const std::exception& ex) {
+        std::cerr << "Error: " << ex.what() << "\n";
         return 1;
     }
 }
