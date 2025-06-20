@@ -17,7 +17,7 @@ Clone the repository and build with MSBuild:
 ```bash
 git clone https://github.com/ao-org/argentum_compressor.git
 cd argentum_compressor
-msbuild argentum_compressor.sln /p:Configuration=Release /p:Platform=x64
+msbuild argentum_compressor.sln /p:Configuration=Release /p:Platform=x86
 ```
 
 > If using Jenkins, make sure `msbuild.exe` is correctly configured in Global Tool Configuration, or call `VsDevCmd.bat` before building.
