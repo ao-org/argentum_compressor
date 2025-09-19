@@ -1,10 +1,6 @@
 name: Build Argentum Compressor (x86 Release)
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   release:
     types: [ published ]
 
@@ -24,32 +20,23 @@ jobs:
       - name: Build solution for x86 Release
         run: msbuild Argentum_Compressor.sln /p:"Configuration=Release;Platform=x86" /m
 
-      # Gather build outputs and pack them
-      - name: Prepare dist/
+      - name: Package dist zip
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          # Copy all exe/dll from any Release folder into dist/
-          Get-ChildItem -Path . -Recurse -Include *.exe,*.dll | Where-Object { $_.FullName -match '/Release/' -or $_.FullName -match '\\Release\\' } | Copy-Item -Destination dist -Force
-          if (-not (Get-ChildItem dist\*.exe -ErrorAction SilentlyContinue)) {
-            Write-Error "No .exe found in any Release folder. Check your MSBuild output path."
+          $exe = "argentum_compressor/Release/argentum_compressor.exe"
+          if (!(Test-Path $exe)) {
+            Get-ChildItem -Recurse -Filter argentum_compressor.exe | Select-Object FullName
+            throw "Expected exe not found at $exe"
           }
-          Compress-Archive -Path dist\* -DestinationPath dist/Argentum_Compressor-x86-Release.zip -Force
-          Write-Host "Packed:"; Get-ChildItem dist
+          Copy-Item $exe dist/
+          Compress-Archive -Path dist/* -DestinationPath dist/Argentum_Compressor-x86-Release.zip -Force
+          Write-Host "Created dist/Argentum_Compressor-x86-Release.zip"
 
-      # Artifact for push/PR runs
-      - name: Upload build artifact (push/PR)
-        if: ${{ github.event_name != 'release' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: Argentum_Compressor-x86-Release
-          path: dist/Argentum_Compressor-x86-Release.zip
-
-      # Attach to GitHub Release
       - name: Attach assets to GitHub Release
-        if: ${{ github.event_name == 'release' }}
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Argentum_Compressor-x86-Release.zip
+          overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
