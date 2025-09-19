@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ main ]
   release:
-    types: [published]
+    types: [ published ]
 
 jobs:
   build:
@@ -24,23 +24,32 @@ jobs:
       - name: Build solution for x86 Release
         run: msbuild Argentum_Compressor.sln /p:"Configuration=Release;Platform=x86" /m
 
-      # Keep downloadable artifacts on push/PR runs
+      # Gather build outputs and pack them
+      - name: Prepare dist/
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # Copy all exe/dll from any Release folder into dist/
+          Get-ChildItem -Path . -Recurse -Include *.exe,*.dll | Where-Object { $_.FullName -match '/Release/' -or $_.FullName -match '\\Release\\' } | Copy-Item -Destination dist -Force
+          if (-not (Get-ChildItem dist\*.exe -ErrorAction SilentlyContinue)) {
+            Write-Error "No .exe found in any Release folder. Check your MSBuild output path."
+          }
+          Compress-Archive -Path dist\* -DestinationPath dist/Argentum_Compressor-x86-Release.zip -Force
+          Write-Host "Packed:"; Get-ChildItem dist
+
+      # Artifact for push/PR runs
       - name: Upload build artifact (push/PR)
         if: ${{ github.event_name != 'release' }}
         uses: actions/upload-artifact@v4
         with:
           name: Argentum_Compressor-x86-Release
-          path: |
-            **\Release\*.exe
-            **\Release\*.dll
+          path: dist/Argentum_Compressor-x86-Release.zip
 
-      # When a Release is published, attach the built files to it
+      # Attach to GitHub Release
       - name: Attach assets to GitHub Release
         if: ${{ github.event_name == 'release' }}
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            **\Release\*.exe
-            **\Release\*.dll
+          files: dist/Argentum_Compressor-x86-Release.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
