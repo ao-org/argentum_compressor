@@ -1,6 +1,10 @@
 name: Build Argentum Compressor (x86 Release)
 
 on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   release:
     types: [ published ]
 
@@ -11,29 +15,26 @@ jobs:
       contents: write  # needed to upload assets to the Release
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@v2
 
-      - name: Build solution for x86 Release
-        run: msbuild Argentum_Compressor.sln /p:"Configuration=Release;Platform=x86" /m
+      - name: Build (x86 Release)
+        run: msbuild Argentum_Compressor.sln /m /p:"Configuration=Release;Platform=x86;OutDir=build\"
 
+      # Only package/upload when it's a Release
       - name: Package dist zip
+        if: ${{ github.event_name == 'release' }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $exe = "argentum_compressor/Release/argentum_compressor.exe"
-          if (!(Test-Path $exe)) {
-            Get-ChildItem -Recurse -Filter argentum_compressor.exe | Select-Object FullName
-            throw "Expected exe not found at $exe"
-          }
-          Copy-Item $exe dist/
-          Compress-Archive -Path dist/* -DestinationPath dist/Argentum_Compressor-x86-Release.zip -Force
+          Copy-Item build\*.exe dist\
+          Copy-Item build\*.dll dist\ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist\* -DestinationPath dist\Argentum_Compressor-x86-Release.zip -Force
           Write-Host "Created dist/Argentum_Compressor-x86-Release.zip"
 
       - name: Attach assets to GitHub Release
+        if: ${{ github.event_name == 'release' }}
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Argentum_Compressor-x86-Release.zip
